@@ -49,6 +49,7 @@ func (handler *QueryHandler) HandleSQL(w http.ResponseWriter, r *http.Request) {
 	utils.GetRootReporter().GetCounter(utils.SQLQueryReceivedBroker).Inc(1)
 	var queryReqeust BrokerSQLRequest
 
+	reqID := handler.getReqestID()
 	start := utils.Now()
 	var err error
 	defer func() {
@@ -58,10 +59,15 @@ func (handler *QueryHandler) HandleSQL(w http.ResponseWriter, r *http.Request) {
 			utils.GetRootReporter().GetCounter(utils.QueryFailedBroker).Inc(1)
 			utils.GetLogger().With(
 				"error", err,
-				"request", queryReqeust).Error("Error happened when processing request")
+				"duration", duration,
+				"requestID", reqID,
+				"request", queryReqeust).Error("Error happened when processing SQL query")
 		} else {
 			utils.GetRootReporter().GetCounter(utils.QuerySucceededBroker).Inc(1)
-			utils.GetLogger().With("request", queryReqeust).Info("Request succeeded")
+			utils.GetLogger().With(
+				"request", queryReqeust,
+				"duration", duration,
+				"requestID", reqID).Info("SQL query succeeded")
 		}
 	}()
 
@@ -80,7 +86,7 @@ func (handler *QueryHandler) HandleSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = handler.exec.Execute(context.Background(), handler.getReqestID(), aql, queryReqeust.Accept == utils.HTTPContentTypeHyperLogLog, w)
+	err = handler.exec.Execute(context.Background(), reqID, aql, queryReqeust.Accept == utils.HTTPContentTypeHyperLogLog, w)
 	if err != nil {
 		apiCom.RespondWithError(w, err)
 		return
@@ -92,6 +98,7 @@ func (handler *QueryHandler) HandleAQL(w http.ResponseWriter, r *http.Request) {
 	var queryReqeust BrokerAQLRequest
 	utils.GetRootReporter().GetCounter(utils.AQLQueryReceivedBroker).Inc(1)
 
+	reqID := handler.getReqestID()
 	start := utils.Now()
 	var err error
 	defer func() {
@@ -101,10 +108,15 @@ func (handler *QueryHandler) HandleAQL(w http.ResponseWriter, r *http.Request) {
 			utils.GetRootReporter().GetCounter(utils.QueryFailedBroker).Inc(1)
 			utils.GetLogger().With(
 				"error", err,
-				"request", queryReqeust).Error("Error happened when processing request")
+				"duration", duration,
+				"requestID", reqID,
+				"request", queryReqeust).Error("Error happened when processing AQL query")
 		} else {
 			utils.GetRootReporter().GetCounter(utils.QuerySucceededBroker).Inc(1)
-			utils.GetLogger().With("request", queryReqeust).Info("Request succeeded")
+			utils.GetLogger().With(
+				"request", queryReqeust,
+				"duration", duration,
+				"requestID", reqID).Info("AQL Query succeeded")
 		}
 	}()
 
@@ -114,7 +126,7 @@ func (handler *QueryHandler) HandleAQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = handler.exec.Execute(context.TODO(), handler.getReqestID(), &queryReqeust.Body.Query, queryReqeust.Accept == utils.HTTPContentTypeHyperLogLog, w)
+	err = handler.exec.Execute(context.TODO(), reqID, &queryReqeust.Body.Query, queryReqeust.Accept == utils.HTTPContentTypeHyperLogLog, w)
 	if err != nil {
 		apiCom.RespondWithError(w, err)
 		return
