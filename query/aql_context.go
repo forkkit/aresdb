@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 	"unsafe"
+	"github.com/uber/aresdb/query/context"
 )
 
 type boundaryType int
@@ -187,6 +188,8 @@ type oopkBatchContext struct {
 	// Values and validities of each stack frame are allocated together,
 	// with the validity array following the value array.
 	// The length of each vector is size (same as indexVectorD).
+	// Note: user should always append the new output stack frame on to the stack
+	// before shrinking the input stack frames
 	exprStackD [][2]devicePointer
 
 	// Input and output storage in device memory before and after sort-reduce-by-key.
@@ -410,6 +413,9 @@ type AQLQueryContext struct {
 
 	// for eager flush query result
 	ResponseWriter http.ResponseWriter
+
+	// helper used to share common codes
+	QCHelper *context.QueryContextHelper `json:"-"`
 }
 
 // IsHLL return if the aggregation function is HLL
@@ -425,4 +431,32 @@ func isAtomicAggType(aggType C.enum_AggregateFunction) bool {
 func (ctx *OOPKContext) UseHashReduction() bool {
 	return utils.GetConfig().Query.EnableHashReduction &&
 		cgoutils.SupportHashReduction() && isAtomicAggType(ctx.AggregateType)
+}
+
+// Initialize qcHelper, TODO: move to specialized constructor
+func (qc *AQLQueryContext) InitQCHelper() {
+	qc.QCHelper = &context.QueryContextHelper{
+		QCOptions: qc,
+	}
+}
+
+func (qc *AQLQueryContext) GetSchema(tableID int) *memCom.TableSchema {
+	return qc.TableScanners[tableID].Schema
+}
+
+func (qc *AQLQueryContext) GetTableID(alias string) (int, bool) {
+	id, exists := qc.TableIDByAlias[alias]
+	return id, exists
+}
+
+func (qc *AQLQueryContext) GetQuery() *queryCom.AQLQuery {
+	return qc.Query
+}
+
+func (qc *AQLQueryContext) SetError(err error) {
+	qc.Error = err
+}
+
+func (qc *AQLQueryContext) IsDataOnly() bool {
+	return qc.DataOnly
 }

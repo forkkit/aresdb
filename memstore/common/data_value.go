@@ -197,6 +197,16 @@ type GoDataValue interface {
 	Read(reader *utils.StreamDataReader) error
 }
 
+// DataValueIterator is a iterator of data value
+type DataValueIterator interface {
+	// read the current data value
+	read() DataValue
+	// advance iterator
+	next()
+	// whether iterator is done
+	done() bool
+}
+
 // DataValue is the wrapper to encapsulate validity, bool value and other value type
 // into a single struct to make it easier for value comparison.
 type DataValue struct {
@@ -587,6 +597,10 @@ func (av *ArrayValue) AddItem(item interface{}) {
 
 // GetSerBytes return the bytes will be used in upsertbatch serialized format
 func (av *ArrayValue) GetSerBytes() int {
+	if av.GetLength() == 0 {
+		// we always align to 8 bytes in upsertbatch
+		return 8
+	}
 	return CalculateListElementBytes(av.DataType, av.GetLength())
 }
 
@@ -920,4 +934,71 @@ func GetDataValue(col interface{}, columnIDInSchema int, columnType string) (Dat
 			columnIDInSchema, col, dataType)
 	}
 	return val, nil
+}
+
+type baseDataValueIterator struct {
+	curIdx int
+	size int
+}
+
+func (iter *baseDataValueIterator) read() DataValue {
+	return NullDataValue
+}
+
+func (iter *baseDataValueIterator) next() {
+	iter.curIdx += 1
+}
+
+func (iter *baseDataValueIterator) done() bool {
+	return iter.curIdx >= iter.size
+}
+
+type primaryKeyDataValueIterator struct {
+	baseDataValueIterator
+
+	primaryKeyCols []int
+	batchReader BatchReader
+	row int
+}
+
+// NewPrimaryKeyDataValueIterator creates DataValueIterator from upsert batch, primary key cols and row number
+func NewPrimaryKeyDataValueIterator(batchReader BatchReader, row int, primaryKeyCols []int) DataValueIterator{
+	return &primaryKeyDataValueIterator{
+		baseDataValueIterator: baseDataValueIterator{
+			size: len(primaryKeyCols),
+		},
+		primaryKeyCols: primaryKeyCols,
+		batchReader: batchReader,
+		row: row,
+	}
+}
+
+func (iter *primaryKeyDataValueIterator) read() DataValue {
+	if !iter.done() {
+		col := iter.primaryKeyCols[iter.curIdx]
+		return iter.batchReader.GetDataValue(iter.row, col)
+	}
+	return NullDataValue
+}
+
+type sliceDataValueIterator struct {
+	baseDataValueIterator
+	values []DataValue
+}
+
+// NewSliceDataValueIterator creates DataValueIterator from slice of DataValue
+func NewSliceDataValueIterator(values []DataValue) DataValueIterator {
+	return &sliceDataValueIterator{
+		baseDataValueIterator: baseDataValueIterator{
+			size: len(values),
+		},
+		values: values,
+	}
+}
+
+func (iter *sliceDataValueIterator) read() DataValue {
+	if !iter.done() {
+		return iter.values[iter.curIdx]
+	}
+	return NullDataValue
 }

@@ -433,7 +433,7 @@ func (qc *AQLQueryContext) prepareForeignTable(memStore memstore.MemStore, joinT
 		for i, columnID := range qc.TableScanners[joinTableID+1].Columns {
 			usage := qc.TableScanners[joinTableID+1].ColumnUsages[columnID]
 			if usage&(columnUsedByAllBatches|columnUsedByLiveBatches) != 0 {
-				sourceVP := batch.Columns[columnID]
+				sourceVP := batch.GetVectorParty(columnID)
 				if sourceVP == nil {
 					continue
 				}
@@ -515,7 +515,7 @@ func (qc *AQLQueryContext) transferLiveBatch(batch *memstore.LiveBatch, size int
 				if firstColumn < 0 {
 					firstColumn = i
 				}
-				sourceVP := batch.Columns[columnID]
+				sourceVP := batch.GetVectorParty(columnID)
 				if sourceVP == nil {
 					continue
 				}
@@ -742,7 +742,7 @@ func (bc *oopkBatchContext) prepareForDimAndMeasureEval(
 		// Extra budget for future proofing.
 		bc.resultCapacity += bc.resultCapacity / 8
 
-		bc.dimensionVectorD = bc.reallocateResultBuffers(bc.dimensionVectorD, dimRowBytes, stream, func(to, from unsafe.Pointer) {
+		bc.reallocateResultBuffers(&bc.dimensionVectorD, dimRowBytes, stream, func(to, from unsafe.Pointer) {
 			asyncCopyDimensionVector(to, from, bc.resultSize, 0,
 				numDimsPerDimWidth, bc.resultCapacity, oldCapacity,
 				cgoutils.AsyncCopyDeviceToDevice, stream, bc.device)
@@ -750,19 +750,19 @@ func (bc *oopkBatchContext) prepareForDimAndMeasureEval(
 
 		// uint32_t for index value
 		if isHLL || !useHashReduction {
-			bc.dimIndexVectorD = bc.reallocateResultBuffers(bc.dimIndexVectorD, 4, stream, nil)
+			bc.reallocateResultBuffers(&bc.dimIndexVectorD, 4, stream, nil)
 		}
 		// uint64_t for hash value
 		// Note: only when aggregate function is hll, we need to reuse vector[0]
 		if isHLL {
-			bc.hashVectorD = bc.reallocateResultBuffers(bc.hashVectorD, 8, stream, func(to, from unsafe.Pointer) {
+			bc.reallocateResultBuffers(&bc.hashVectorD, 8, stream, func(to, from unsafe.Pointer) {
 				cgoutils.AsyncCopyDeviceToDevice(to, from, bc.resultSize*8, stream, bc.device)
 			})
 		} else if !useHashReduction {
-			bc.hashVectorD = bc.reallocateResultBuffers(bc.hashVectorD, 8, stream, nil)
+			bc.reallocateResultBuffers(&bc.hashVectorD, 8, stream, nil)
 		}
 
-		bc.measureVectorD = bc.reallocateResultBuffers(bc.measureVectorD, measureBytes, stream, func(to, from unsafe.Pointer) {
+		bc.reallocateResultBuffers(&bc.measureVectorD, measureBytes, stream, func(to, from unsafe.Pointer) {
 			cgoutils.AsyncCopyDeviceToDevice(to, from, bc.resultSize*measureBytes, stream, bc.device)
 		})
 	}
@@ -770,20 +770,25 @@ func (bc *oopkBatchContext) prepareForDimAndMeasureEval(
 
 // reallocateResultBuffers reallocates the result buffer pair to size
 // resultCapacity*unitBytes and copies resultSize*unitBytes from input[0] to output[0].
+// this function will read and modify the device pointers in buffers
 func (bc *oopkBatchContext) reallocateResultBuffers(
-	input [2]devicePointer, unitBytes int, stream unsafe.Pointer, copyFunc func(to, from unsafe.Pointer)) (output [2]devicePointer) {
+	buffers *[2]devicePointer, unitBytes int, stream unsafe.Pointer, copyFunc func(to, from unsafe.Pointer)) {
 
-	output = [2]devicePointer{
-		deviceAllocate(bc.resultCapacity*unitBytes, bc.device),
-		deviceAllocate(bc.resultCapacity*unitBytes, bc.device),
-	}
+	// copy previous pointers first
+	input := [2]devicePointer{buffers[0], buffers[1]}
+	// always deallocate original buffer
+	defer func() {
+		deviceFreeAndSetNil(&input[0])
+		deviceFreeAndSetNil(&input[1])
+	}()
+
+	// reallocate new device buffers
+	buffers[0] = deviceAllocate(bc.resultCapacity*unitBytes, bc.device)
+	buffers[1] = deviceAllocate(bc.resultCapacity*unitBytes, bc.device)
 
 	if copyFunc != nil {
-		copyFunc(output[0].getPointer(), input[0].getPointer())
+		copyFunc(buffers[0].getPointer(), input[0].getPointer())
 	}
-
-	deviceFreeAndSetNil(&input[0])
-	deviceFreeAndSetNil(&input[1])
 	return
 }
 
@@ -1041,7 +1046,7 @@ func (qc *AQLQueryContext) calculateMemoryRequirement(memStore memstore.MemStore
 func (qc *AQLQueryContext) estimateLiveBatchMemoryUsage(batch *memstore.LiveBatch) int {
 	columnMemUsage := 0
 	for _, columnID := range qc.TableScanners[0].Columns {
-		sourceVP := batch.Columns[columnID]
+		sourceVP := batch.GetVectorParty(columnID)
 		if sourceVP == nil {
 			continue
 		}
@@ -1149,11 +1154,7 @@ func (qc *AQLQueryContext) estimateMemUsageForBatch(firstColumnSize, columnMemUs
 
 	// 8. Dimension vector memory usage (input + output)
 	if qc.IsNonAggregationQuery {
-		maxRowsPerBatch := maxSizeAfterPreFilter
-		if qc.Query.Limit < maxRowsPerBatch {
-			maxRowsPerBatch = qc.Query.Limit
-		}
-		memUsage += maxRowsPerBatch * qc.OOPK.DimRowBytes * 2
+		memUsage += maxSizeAfterPreFilter * qc.OOPK.DimRowBytes * 2
 	} else {
 		if qc.OOPK.UseHashReduction() {
 			// For hash reduction, need hash table with int64_t key (8 bytes) and measureBytes value.
@@ -1281,7 +1282,7 @@ func (qc *AQLQueryContext) calculateForeignTableMemUsage(memStore memstore.MemSt
 			for _, columnID := range qc.TableScanners[joinTableID+1].Columns {
 				usage := qc.TableScanners[joinTableID+1].ColumnUsages[columnID]
 				if usage&(columnUsedByAllBatches|columnUsedByLiveBatches) != 0 {
-					sourceVP := batch.Columns[columnID]
+					sourceVP := batch.GetVectorParty(columnID)
 					if sourceVP == nil {
 						continue
 					}
@@ -1485,7 +1486,7 @@ func shouldSkipLiveBatchWithFilter(b *memstore.LiveBatch, filter expr.Expr) bool
 
 		if columnExpr != nil && numExpr != nil {
 			// Time filters and main table filters are guaranteed to be on main table.
-			vp := b.Columns[columnExpr.ColumnID]
+			vp := b.GetVectorParty(columnExpr.ColumnID)
 			if vp == nil {
 				return true
 			}
